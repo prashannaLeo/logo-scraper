@@ -1,6 +1,6 @@
-# AI Tool Logo Scraper
+# Site Logo Scraper
 
-A set of Python scripts to recover, check, and replace broken Firebase Storage image URLs in `.docx` files — and scrape logos directly from websites.
+A lightweight Python script that reads a list of website URLs and automatically downloads the best available logo for each site.
 
 ---
 
@@ -8,117 +8,110 @@ A set of Python scripts to recover, check, and replace broken Firebase Storage i
 
 ```
 .
-├── scrape_logos.py        # Scrape logos from a list of URLs
-├── check_and_download.py  # Check Firebase URLs and download working images
-├── replace_urls.py        # Replace old Firebase URLs in .docx with new bucket URLs
-├── urls.txt               # Input file: one site URL per line
-├── requirements.txt       # Python dependencies
+├── scrape_logos.py   # Main scraper script
+├── urls.txt          # Input file: one site URL per line
+├── requirements.txt  # Python dependencies
 └── README.md
 ```
 
 ---
 
-## Scripts
+## How It Works
 
-### 1. `scrape_logos.py`
-Reads a list of website URLs, scrapes the best available logo for each site, and saves them locally.
+For each URL, the script fetches the homepage and tries the following strategies in order, stopping at the first success:
 
-**Strategy priority** (mirrors what browsers show in the tab):
-1. `<link rel="icon">` — largest PNG/SVG/WebP found in the page `<head>`
-2. `<link rel="apple-touch-icon">` — high-res iOS icon
-3. Clearbit Logo API
-4. `/favicon.ico`
-5. Google Favicon Service
-
-**Usage:**
-```bash
-python scrape_logos.py --input urls.txt --out-dir logos
-```
-
-**Output:**
-- `logos/<domain>.png` — downloaded logo for each site
-- `logos/_logo_map.csv` — mapping of site → logo URL → saved file → strategy used
-
----
-
-### 2. `check_and_download.py`
-Reads all Firebase Storage image URLs from a `.docx` file, checks which are still accessible, downloads the working ones, and lists the broken ones.
-
-**Usage:**
-```bash
-python check_and_download.py --input your_doc.docx --out-dir downloaded_images
-```
-
-**Output:**
-- `downloaded_images/<filename>` — all successfully downloaded images
-- `downloaded_images/_BROKEN_IMAGES.txt` — list of URLs that failed
-
----
-
-### 3. `replace_urls.py`
-Replaces all old Firebase Storage URLs inside a `.docx` file with a new bucket base URL, preserving original filenames.
-
-**Usage:**
-```bash
-python replace_urls.py \
-  --input  original.docx \
-  --output updated.docx \
-  --new-base "https://storage.googleapis.com/YOUR-BUCKET-NAME"
-```
+| Priority | Strategy | Description |
+|----------|----------|-------------|
+| 1 | `<link rel="icon">` | Largest PNG/SVG/WebP from page `<head>` — same icon browsers show in the tab |
+| 2 | `<link rel="apple-touch-icon">` | High-res iOS home screen icon |
+| 3 | Clearbit Logo API | Clean brand logo from Clearbit |
+| 4 | `/favicon.ico` | Classic root favicon fallback |
+| 5 | Google Favicon Service | Last resort at 128px |
 
 ---
 
 ## Setup
 
-### Requirements
+### 1. Clone the repo and create a virtual environment
+
+```bash
+git clone <repo-url>
+cd site-logo-scraper
+
+python -m venv venv
+
+# Windows
+venv\Scripts\activate
+
+# macOS / Linux
+source venv/bin/activate
+```
+
+### 2. Install dependencies
+
 ```bash
 pip install -r requirements.txt
 ```
 
-> `check_and_download.py` and `replace_urls.py` use Python stdlib only — no extra packages needed for those.
+### 3. Add your URLs to `urls.txt`
 
-### Python Version
-Python 3.6 or newer required.
-
-### Windows / MSYS2 Note
-If you see `SSL: CERTIFICATE_VERIFY_FAILED` errors, always use `python` (not `py`) to run scripts inside a virtualenv:
-```powershell
-python script.py   # ✅ uses venv
-py script.py       # ❌ may bypass venv and fail SSL
-```
-
----
-
-## Typical Workflow
-
-1. **Check which Firebase images are still alive and download them:**
-   ```bash
-   python check_and_download.py --input your_doc.docx --out-dir downloaded_images
-   ```
-
-2. **Re-upload downloaded images to your new bucket.**  
-   Re-take screenshots for any listed in `_BROKEN_IMAGES.txt`.
-
-3. **Scrape logos for all tools:**
-   ```bash
-   python scrape_logos.py --input urls.txt --out-dir logos
-   ```
-
-4. **Update the .docx with the new bucket URLs:**
-   ```bash
-   python replace_urls.py --input your_doc.docx --output updated.docx \
-     --new-base "https://storage.googleapis.com/YOUR-BUCKET-NAME"
-   ```
-
----
-
-## `urls.txt` Format
-
-One URL per line. Lines starting with `#` are ignored.
+One URL per line. Lines starting with `#` are ignored:
 
 ```
 https://chat.openai.com
 https://www.grammarly.com
-# this line is a comment and will be skipped
+# this line is a comment
 https://huggingface.co
+```
+
+---
+
+## Usage
+
+```bash
+python scrape_logos.py --input urls.txt --out-dir logos
+```
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--input` | required | Path to the URLs text file |
+| `--out-dir` | `logos` | Folder to save downloaded logos |
+
+---
+
+## Output
+
+```
+logos/
+├── grammarly.com.png
+├── huggingface.co.ico
+├── openai.com.png
+├── ...
+└── _logo_map.csv
+```
+
+**`_logo_map.csv` columns:**
+
+| Column | Description |
+|--------|-------------|
+| `site` | Original URL from input file |
+| `domain` | Extracted domain |
+| `logo_url` | The URL the logo was fetched from |
+| `saved_file` | Local path of the saved file |
+| `status` | `ok:<strategy>` or `failed` |
+
+---
+
+## Requirements
+
+- Python 3.6+
+- `requests`
+- `beautifulsoup4`
+
+### Windows / MSYS2 Note
+Always use `python` instead of `py` inside a virtualenv to avoid SSL errors:
+
+```powershell
+python scrape_logos.py --input urls.txt --out-dir logos   # correct
+py scrape_logos.py --input urls.txt --out-dir logos       # may bypass venv
 ```
