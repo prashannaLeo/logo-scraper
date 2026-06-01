@@ -215,11 +215,20 @@ def main():
         writer = csv.DictWriter(f, fieldnames=["site", "domain", "logo_url", "saved_file", "status"])
         writer.writeheader()
         writer.writerows(results)
+    # save images name in txt file
+    txt_path = "image_list.txt"
+    with open(txt_path, "w", encoding="utf-8") as f:
+        for r in results:
+            if r["status"].startswith("ok") and r["saved_file"]:
+                # Get just the filename (e.g., "openai.com.png")
+                filename = os.path.basename(r["saved_file"])
+                f.write(f"{filename}\n")
 
     ok   = [r for r in results if r["status"].startswith("ok")]
     fail = [r for r in results if r["status"] == "failed"]
     print(f"\n{'='*60}")
     print(f"✅ {len(ok)} logos downloaded   ❌ {len(fail)} failed")
+    print(f"📝 Filenames saved to: {txt_path}")
     if fail:
         print("\nFailed sites:")
         for r in fail:
