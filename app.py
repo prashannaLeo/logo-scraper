@@ -1,9 +1,16 @@
+import requests
 import os
 import re
 import base64
 import io
 from PIL import Image
 import streamlit as st
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 
 # Import the logo scraper logic
 from scrape_logos import scrape_logo
@@ -357,46 +364,27 @@ STORAGE_JS = """
 <script>
 (function() {
     const LS_KEY = 'logo_map_base64';
-    function encode(h) {
-        try { return JSON.stringify(h); } catch(e) { return ''; }
-    }
     function saveList() {
         try {
-            const rows = [];
-            const items = window.streamlitSessionStorage || [];
-            (window.__streamlitSessionState || {}).history
-            let history = [];
-            try { history = window.streamlit?.['last_history_v1'] || []; } catch(e) {}
-            if (!history.length) {
-                const stored = localStorage.getItem(LS_KEY);
-                if (stored) {
-                    try { history = JSON.parse(stored); } catch(e) {}
-                }
-            }
-            if (!history.length) {
-                try {
-                    const raw = sessionStorage.getItem(LS_KEY);
-                    if (raw) history = JSON.parse(raw);
-                } catch(e) {}
-            }
+            const stored = localStorage.getItem(LS_KEY);
+            const history = stored ? JSON.parse(stored) : [];
             if (history.length) {
                 localStorage.setItem(LS_KEY, JSON.stringify(history));
             }
         } catch(e) {}
     }
-    function patchSubmit() {
-        window.persistLogoMap = function(data) {
+    window.persistLogoMap = function(data) {
+        try {
             const rows = data || [];
             localStorage.setItem(LS_KEY, JSON.stringify(rows));
-            try {
-                window.streamlit.setComponentValue && window.streamlit.setComponentValue({type:'storage',storage:'localStorage',key:LS_KEY,value:JSON.stringify(rows)});
-            } catch(e) {}
-        };
-    }
+            if (window.streamlit && typeof window.streamlit.setComponentValue === 'function') {
+                window.streamlit.setComponentValue({type:'storage',storage:'localStorage',key:LS_KEY,value:JSON.stringify(rows)});
+            }
+        } catch(e) {}
+    };
+    saveList();
     if (document.readyState === 'loading') {
-        window.addEventListener('DOMContentLoaded', patchSubmit);
-    } else {
-        patchSubmit();
+        window.addEventListener('DOMContentLoaded', saveList);
     }
 })();
 </script>
@@ -457,6 +445,56 @@ def get_download_data(saved_file_path: str):
                 mime = f"image/{ext.lstrip('.')}" if ext else "image/png"
                 return f.read(), mime, ext or ".png"
 
+def upload_logo_to_imgbb(image_bytes: bytes, api_key: str) -> str:
+    """Uploads logo bytes to ImgBB and returns the permanent URL."""
+    url = "https://api.imgbb.com/1/upload"
+
+    encoded_image = base64.b64encode(image_bytes).decode('utf-8')
+
+    payload = {
+        "key": api_key,
+        "image": encoded_image,
+    }
+
+    response = requests.post(url, data=payload)
+
+    if response.status_code == 200:
+        data = response.json()
+        return data['data']['url']
+    else:
+        st.error(f"ImgBB upload failed: {response.status_code} - {response.text}")
+        return None
+
+def is_supported_image_ext(ext: str) -> bool:
+    return ext.lower() in (".png", ".jpg", ".jpeg", ".svg", ".webp", ".gif")
+
+def build_local_image_entry(domain: str, site: str, logo_url: str, saved_file: str, strategy: str) -> str:
+    if not os.path.exists(saved_file):
+        return ""
+    ext = os.path.splitext(saved_file)[-1].lower()
+    if not is_supported_image_ext(ext):
+        try:
+            img = Image.open(saved_file)
+            if img.mode != 'RGBA':
+                img = img.convert('RGBA')
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            return base64.b64encode(buf.getvalue()).decode()
+        except Exception:
+            return ""
+    try:
+        with open(saved_file, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+    except Exception:
+        return ""
+
+def get_imgbb_api_key() -> str:
+    for var_name in ("IMGBB_API_KEY", "IMG_BB_API_KEY", "IMGBB_KEY"):
+        val = os.environ.get(var_name)
+        if val:
+            return val
+    return ""
+
 # ── High-Performance Session State Initialization (Base64 Memory Caching) ──────
 
 if "history" not in st.session_state:
@@ -496,21 +534,98 @@ if "active_logo" not in st.session_state:
 
 # Sidebar History Operations
 def add_to_history(result: dict):
-    # Eliminate duplicate domains, place at index 0
     st.session_state.history = [h for h in st.session_state.history if h["domain"] != result["domain"]]
     st.session_state.history.insert(0, result)
+    _sync_history_to_storage()
 
 def delete_history_item(domain: str):
     st.session_state.history = [h for h in st.session_state.history if h["domain"] != domain]
     if st.session_state.active_logo and st.session_state.active_logo["domain"] == domain:
-        if st.session_state.history:
-            st.session_state.active_logo = st.session_state.history[0]
-        else:
-            st.session_state.active_logo = None
+        st.session_state.active_logo = st.session_state.history[0] if st.session_state.history else None
+    _sync_history_to_storage()
 
 def clear_all_history():
     st.session_state.history = []
     st.session_state.active_logo = None
+    _clear_history_storage()
+
+
+def _local_history_payload(history):
+    try:
+        import json
+        rows = []
+        for h in history:
+            rows.append({
+                "domain": h.get("domain", ""),
+                "site": h.get("site", ""),
+                "logo_url": h.get("logo_url", ""),
+                "saved_file": h.get("saved_file", ""),
+                "strategy": h.get("strategy", ""),
+                "base64_data": h.get("base64_data", ""),
+                "storage": h.get("storage", "local")
+            })
+        return json.dumps(rows)
+    except Exception:
+        return "[]"
+
+
+def _sync_history_to_storage():
+    try:
+        payload = _local_history_payload(st.session_state.history)
+        st.markdown(
+            f"<script>try{{if(window.persistLogoMap)window.persistLogoMap({payload});}}catch(e){{}}</script>",
+            unsafe_allow_html=True,
+        )
+    except Exception:
+        pass
+
+
+def _clear_history_storage():
+    try:
+        st.markdown(
+            "<script>try{localStorage.removeItem('logo_map_base64');}catch(e){}</script>",
+            unsafe_allow_html=True,
+        )
+    except Exception:
+        pass
+
+
+def _restore_history_from_storage():
+    try:
+        history = []
+        for row in st.session_state.get("_restored_ls_history", []) or []:
+            history.append(row)
+        return history
+    except Exception:
+        return []
+
+
+def _try_restore_local_storage_history():
+    try:
+        from streamlit.components.v1 import html as st_html
+        html = """
+        <div id="logo_storage_restore" style="display:none"></div>
+        <script>
+        (function() {
+            const LS_KEY = 'logo_map_base64';
+            const raw = localStorage.getItem(LS_KEY);
+            if (!raw) return;
+            try {
+                const data = JSON.parse(raw);
+                if (Array.isArray(data) && window.streamlit && typeof window.streamlit.setComponentValue === 'function') {
+                    window.streamlit.setComponentValue({type:'storage',storage:'localStorage',key:LS_KEY,value:JSON.stringify(data)});
+                }
+            } catch(e){}
+        })();
+        </script>
+        """
+        st_html(html, height=0)
+    except Exception:
+        pass
+
+
+try_restore_local_storage_history = _try_restore_local_storage_history
+restore_history_from_storage = _restore_history_from_storage
 
 # ── Main Application Interface ────────────────────────────────────────────────
 
@@ -570,12 +685,32 @@ with col_main:
                             "base64_data": b64_str  # Cached instantly in memory!
                         }
                         
+                        api_key = get_imgbb_api_key()
+                        if api_key and b64_str:
+                            try:
+                                image_bytes = base64.b64decode(b64_str)
+                                remote_url = upload_logo_to_imgbb(image_bytes, api_key)
+                                if remote_url:
+                                    history_entry["storage"] = "imgbb"
+                                    history_entry["remote_url"] = remote_url
+                                    st.toast("☁️ Logo saved to ImgBB", icon="☁️")
+                                    print(f"[STORAGE] {domain} -> ImgBB: {remote_url}")
+                                else:
+                                    history_entry["storage"] = "local"
+                                    print(f"[STORAGE] {domain} -> local (upload returned empty)")
+                            except Exception as e:
+                                st.toast("⚠️ ImgBB upload skipped", icon="⚠️")
+                                history_entry["storage"] = "local"
+                                print(f"[STORAGE] {domain} -> local (ImgBB error: {e})")
+                        else:
+                            history_entry["storage"] = "local"
+                            print(f"[STORAGE] {domain} -> local (no API key)")
+                        
                         # Append and set active
                         add_to_history(history_entry)
                         st.session_state.active_logo = history_entry
                         
                         st.toast(f"🎉 Successfully scraped logo via {strategy}!", icon="🎉")
-                        st.rerun()
                     else:
                         st.error(f"❌ Could not retrieve a brand logo for **{domain}**. We tested favicon links, apple headers, clearbit, and fallback services, but none succeeded.")
                 except Exception as e:
